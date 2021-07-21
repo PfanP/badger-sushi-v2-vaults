@@ -8,6 +8,9 @@ pragma experimental ABIEncoderV2;
 // These are the core Yearn libraries
 import {BaseStrategy, StrategyParams} from "@badger/contracts/BaseStrategy.sol";
 import {SafeERC20, SafeMath, IERC20, Address} from "@openzeppelin/contracts/token/ERC20/SafeERC20.sol";
+import {IMiniChefV2} from "../interfaces/sushiswap/IMinichef.sol";
+import {IRewarder} from "../interfaces/sushiswap/IRewarder.sol";
+import {IUniswapRouterV2} from "../interfaces/uniswap/IUniswapRouterV2.sol";
 
 // Import interfaces for many popular DeFi projects, or add your own!
 //import "../interfaces/<protocol>/<Interface>.sol";
@@ -17,6 +20,11 @@ contract Strategy is BaseStrategy {
     using Address for address;
     using SafeMath for uint256;
 
+    address public constant chef = 0x0769fd68dFb93167989C6f7254cd0D766Fb2841F;
+    address public constant wmatic = 0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270;
+    uint256 public pid = 0;
+    IUniswapRouterV2 public ROUTER;
+
     function initialize(
         address _vault,
         address _strategist,
@@ -24,7 +32,7 @@ contract Strategy is BaseStrategy {
         address _keeper
     ) external {
         BaseStrategy._initialize(_vault, _strategist, _rewards, _keeper);
-
+        want.safeApprove(chef, type(uint256).max);
         // Do more stuff here if you want
         // minReportDelay = 0;
         // maxReportDelay = 86400;
@@ -38,12 +46,13 @@ contract Strategy is BaseStrategy {
 
     function name() external view override returns (string memory) {
         // Add your own name here, suggestion e.g. "StrategyCreamYFI"
-        return "Strategy<ProtocolName><TokenType>";
+        return "StrategySushiv2LP";
     }
 
     function estimatedTotalAssets() public view override returns (uint256) {
         // TODO: Build a more accurate estimate using the value of all positions in terms of `want`
-        return want.balanceOf(address(this));
+        (uint256 staked, ) = IMiniChefV2(chef).userInfo(pid, address(this));
+        return balanceOfWant().add(staked);
     }
 
     function prepareReturn(uint256 _debtOutstanding)
@@ -61,13 +70,60 @@ contract Strategy is BaseStrategy {
         // This would be the old harvest, where you just report _profit, _loss and _debtPayment
 
         // NOTE: This is here just for tests to pass (so strat repays all it owes at all times)
+        uint256 _before = want.balanceOf(address(this));
+
+        (
+            uint256 pendingSushi,
+            uint256 pendingMatic
+        ) = checkPendingRewardInternal();
+
+        if (pendingSushi > 0) {
+            IMiniChefV2(chef).harvest(pid, address(this));
+        }
+
+        // swap wmatic to sushi
+        uint256 _wmatic = IERC20(wmatic).balanceOf(address(this));
+        if (_wmatic > 0) {
+            _swapWMaticToWant(_wmatic);
+        }
+
         _debtPayment = _debtOutstanding;
+
+        if (_debtPayment > 0) {
+            IMiniChefV2(chef).withdraw(pid, _debtPayment, address(this));
+        }
+
+        _profit = want.balanceOf(address(this)).sub(_before);
+        _loss = 0;
     }
 
     function adjustPosition(uint256 _debtOutstanding) internal override {
         // TODO: Do something to invest excess `want` tokens (from the Vault) into your positions
         // NOTE: Try to adjust positions so that `_debtOutstanding` can be freed up on *next* harvest (not immediately)
         // This is tend, not much to change here
+
+        uint256 _beforeLp = want.balanceOf(address(this));
+
+        if (_beforeLp > _debtOutstanding) {
+            IMiniChefV2(chef).deposit(
+                pid,
+                _beforeLp.sub(_debtOutstanding),
+                address(this)
+            );
+        }
+
+        if (_debtOutstanding > _beforeLp) {
+            // We need to withdraw
+            require(
+                balanceOfPool() > _debtOutstanding.sub(_beforeLp),
+                "Small amount of balance with Pool"
+            );
+            IMiniChefV2(chef).withdraw(
+                pid,
+                _debtOutstanding.sub(_beforeLp),
+                address(this)
+            );
+        }
     }
 
     function liquidatePosition(uint256 _amountNeeded)
@@ -80,6 +136,16 @@ contract Strategy is BaseStrategy {
         // NOTE: Maintain invariant `_liquidatedAmount + _loss <= _amountNeeded`
 
         //This is basically withdrawSome
+        uint256 _preWant = balanceOfWant();
+
+        if (_preWant < _amountNeeded) {
+            uint256 _toWithdraw = _amountNeeded.sub(_preWant);
+            require(
+                balanceOfPool() > _toWithdraw,
+                "Small amount of balance with Pool"
+            );
+            IMiniChefV2(chef).withdraw(pid, _toWithdraw, address(this));
+        }
 
         uint256 totalAssets = want.balanceOf(address(this));
         if (_amountNeeded > totalAssets) {
@@ -92,6 +158,11 @@ contract Strategy is BaseStrategy {
 
     function liquidateAllPositions() internal override returns (uint256) {
         // This is a generalization of withdrawAll that withdraws everything for the entire strat
+        (uint256 staked, ) = IMiniChefV2(chef).userInfo(pid, address(this));
+
+        uint256 totalBalance = estimatedTotalAssets();
+        // Withdraw all want from Chef
+        IMiniChefV2(chef).withdrawAndHarvest(pid, staked, address(this));
 
         // TODO: Liquidate all positions and return the amount freed.
         return want.balanceOf(address(this));
@@ -103,6 +174,8 @@ contract Strategy is BaseStrategy {
         // TODO: Transfer any non-`want` tokens to the new strategy
         // NOTE: `migrate` will automatically forward all `want` in this strategy to the new one
         // This is gone if we use upgradeable
+        prepareReturn(0);
+        liquidateAllPositions();
     }
 
     // Override this to add all tokens/tokenized positions this contract manages
@@ -118,12 +191,12 @@ contract Strategy is BaseStrategy {
     //      protected[2] = tokenC;
     //      return protected;
     //    }
-    function protectedTokens()
-        public
-        view
-        override
-        returns (address[] memory)
-    {}
+    function protectedTokens() public view override returns (address[] memory) {
+        address[] memory protected = new address[](1);
+        protected[0] = address(want);
+        // NOTE: May need to add lpComponent anyway
+        return protected;
+    }
 
     /**
      * @notice
@@ -148,5 +221,47 @@ contract Strategy is BaseStrategy {
     {
         // TODO create an accurate price oracle
         return _amtInWei;
+    }
+
+    /// @notice swap sushi to want
+    function _swapWMaticToWant(uint256 toSwap) internal returns (uint256) {
+        uint256 startingWantBalance = want.balanceOf(address(this));
+
+        address[] memory path = new address[](2);
+        path[0] = wmatic;
+        path[1] = address(want);
+
+        // Warning, no slippage checks, can be frontrun
+        ROUTER.swapExactTokensForTokens(toSwap, 0, path, address(this), now);
+
+        return want.balanceOf(address(this)).sub(startingWantBalance);
+    }
+
+    function checkPendingRewardInternal() internal returns (uint256, uint256) {
+        uint256 _pendingSushi = IMiniChefV2(chef).pendingSushi(
+            pid,
+            address(this)
+        );
+        IRewarder rewarder = IMiniChefV2(chef).rewarder(pid);
+        (, uint256[] memory _rewardAmounts) = rewarder.pendingTokens(
+            pid,
+            address(this),
+            0
+        );
+
+        uint256 _pendingMatic;
+        if (_rewardAmounts.length > 0) {
+            _pendingMatic = _rewardAmounts[0];
+        }
+        return (_pendingSushi, _pendingMatic);
+    }
+
+    function balanceOfWant() public view returns (uint256) {
+        return want.balanceOf(address(this));
+    }
+
+    function balanceOfPool() public view returns (uint256) {
+        (uint256 amount, ) = IMiniChefV2(chef).userInfo(pid, address(this));
+        return amount;
     }
 }
