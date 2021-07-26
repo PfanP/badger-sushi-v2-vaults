@@ -55,7 +55,7 @@ def test_emergency_permissions_management(strategy, strategist, gov, guardian, m
 #       Make sure to demonstrate the "worst case losses" as well as the time it takes
 # NOTE: lpComponent doesn't exist
 def test_emergency_exit(
-    chain, accounts, token, vault, strategy, user, strategist, amount, RELATIVE_APPROX, lpComponent, borrowed, reward, incentivesController
+    chain, accounts, token, vault, strategy, user, strategist, amount, RELATIVE_APPROX, lpComponent, reward
 ):
     # Deposit to the vault
     token.approve(vault.address, amount, {"from": user})
@@ -80,24 +80,16 @@ def test_emergency_exit(
     chain.sleep(3600 * 24 * 1) ## Sleep 1 day
     chain.mine(1)
     
-    print("Reward") 
-    print(incentivesController.getRewardsBalance(
-            [lpComponent, borrowed],
-            strategy
-        ))
     print("stratDep2 ")
     print(strategy.estimatedTotalAssets())
 
     # Harvest 2: Realize profit
     strategy.harvest()
     print("Reward 2") 
-    print(incentivesController.getRewardsBalance(
-            [lpComponent, borrowed],
-            strategy
-        ))
+
     print("stratDep3 ")
     print(strategy.estimatedTotalAssets())
-    amountAfterHarvest = token.balanceOf(strategy) + lpComponent.balanceOf(strategy) - borrowed.balanceOf(strategy)
+    amountAfterHarvest = strategy.balanceOfPool() + strategy.balanceOfWant()
     chain.sleep(3600 * 6)  # 6 hrs needed for profits to unlock
     chain.mine(1)
     profit = token.balanceOf(vault.address)  # Profits go to vault
@@ -124,7 +116,6 @@ def test_emergency_exit(
 
     strategy.harvest() ## Will liquidate all
 
-    assert lpComponent.balanceOf(strategy) == 0
     assert token.balanceOf(strategy) == 0
     assert token.balanceOf(vault) >= amount ## The vault has all funds (some loss may have happened)
 

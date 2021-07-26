@@ -36,22 +36,4 @@ def test_are_you_trying(user, vault, strategy, token, amount, gov):
 
   # Use this if it should invest all
   # assert token.balanceOf(strategy) == 0
-
-  # Change to this if the strat is supposed to hodl and do nothing
-  #assert strategy.balanceOf(token) = depositAmount
-
-  ## TEST 2: Is the Harvest profitable?
-  harvest = strategy.harvest()
-  event = harvest.events["Harvested"]
-
-  print("event")
-  print(event)
-
-  ## The event we are looking for
-  # Harvested(uint256 profit, uint256 loss, uint256 debtPayment, uint256 debtOutstanding);
-  # If it doesn't print, we don't token it
-  assert event["profit"] > 0
-  assert event["profit"] > event["loss"] ## You can loose some funds, that's ok, but you have to be profitable
-
-
   

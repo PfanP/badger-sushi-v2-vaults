@@ -125,6 +125,9 @@ def test_migrate_single_user(user, vault, strategy, want, strategist, gov):
         vault.revokeStrategy(strategy, {"from": randomUser})
     ## Set debt limit to zero so on next harvest all funds will be withdrawn
     vault.revokeStrategy(strategy, {"from": gov})
+    strategyBalance = vault.debtOutstanding()
+    print("strategyBalance")
+    print(strategyBalance)
     strategy.harvest() ## Harvest to wihdraw funds
 
     after = {"settWant": want.balanceOf(vault), "stratWant": strategy.estimatedTotalAssets()}

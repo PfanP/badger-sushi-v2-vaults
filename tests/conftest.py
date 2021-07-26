@@ -3,9 +3,9 @@ from brownie import config
 from brownie import Contract
 
 ## SET These Variables up for the testing suite
-WANT = "0x6b175474e89094c44da98b954eedeac495271d0f" ## Dai
-LP_COMPONENT = "0x028171bca77440897b824ca71d1c56cac55b68a3" ## aDAI
-REWARD_TOKEN = "0x7fc66500c84a76ad7e9c93437bfc5ac33e2ddae9" ## AAVE Token
+WANT = "0xE62Ec2e799305E0D367b0Cc3ee2CdA135bF89816" ## WBTC<-> WETH
+LP_COMPONENT = "0x0769fd68dFb93167989C6f7254cd0D766Fb2841F" ## aDAI
+REWARD_TOKEN = "0x0b3F868E0BE5597D5DB7fEB59E1CADBb0fdDa50a" ## Sushi Token
 
 PROTECTED_TOKENS = [WANT, LP_COMPONENT, REWARD_TOKEN]
 ## Fees in Basis Points
@@ -75,19 +75,19 @@ def reward():
 
 @pytest.fixture
 def amount(accounts, token, user):
-    amount = 10_000 * 10 ** token.decimals()
+    amount = 0.0005* (10 ** token.decimals())
     
     # In order to get some funds for the token you are about to use,
     # it impersonate an exchange address to use it's funds.
     ## TODO: Change this to an address with at least `amount` of want
-    reserve = accounts.at("0x5d3a536E4D6DbD6114cc1Ead35777bAB948E3643", force=True)
+    reserve = accounts.at("0x0769fd68dfb93167989c6f7254cd0d766fb2841f", force=True)
     token.transfer(user, amount, {"from": reserve})
     yield amount
 
 
 @pytest.fixture
 def weth():
-    token_address = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+    token_address = "0x0d500b1d8e8ef31e21c99d1db9a6444d3adf1270"
     yield Contract(token_address)
 
 

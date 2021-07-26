@@ -22,8 +22,15 @@ contract Strategy is BaseStrategy {
 
     address public constant chef = 0x0769fd68dFb93167989C6f7254cd0D766Fb2841F;
     address public constant wmatic = 0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270;
-    uint256 public pid = 0;
-    IUniswapRouterV2 public ROUTER;
+    address public constant sushi = 0x0b3F868E0BE5597D5DB7fEB59E1CADBb0fdDa50a;
+    address public constant wbtc = 0x1BFD67037B42Cf73acF2047067bd4F2C47D9BfD6;
+    address public constant weth = 0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619;
+    address public constant SUSHISWAP_ROUTER =
+        0x1b02dA8Cb0d097eB8D57A175b88c7D8b47997506;
+    address public constant WBTC_WETH_LP =
+        0xE62Ec2e799305E0D367b0Cc3ee2CdA135bF89816;
+    uint256 public pid = 3;
+    uint256 public sl = 5;
 
     function initialize(
         address _vault,
@@ -33,6 +40,13 @@ contract Strategy is BaseStrategy {
     ) external {
         BaseStrategy._initialize(_vault, _strategist, _rewards, _keeper);
         want.safeApprove(chef, type(uint256).max);
+        IERC20(wmatic).safeApprove(SUSHISWAP_ROUTER, type(uint256).max);
+        IERC20(wbtc).safeApprove(SUSHISWAP_ROUTER, type(uint256).max);
+        IERC20(weth).safeApprove(SUSHISWAP_ROUTER, type(uint256).max);
+        IERC20(sushi).safeApprove(SUSHISWAP_ROUTER, type(uint256).max);
+
+        IERC20(wbtc).safeApprove(WBTC_WETH_LP, type(uint256).max);
+        IERC20(wmatic).safeApprove(WBTC_WETH_LP, type(uint256).max);
         // Do more stuff here if you want
         // minReportDelay = 0;
         // maxReportDelay = 86400;
@@ -72,29 +86,51 @@ contract Strategy is BaseStrategy {
         // NOTE: This is here just for tests to pass (so strat repays all it owes at all times)
         uint256 _before = want.balanceOf(address(this));
 
-        (
-            uint256 pendingSushi,
-            uint256 pendingMatic
-        ) = checkPendingRewardInternal();
-
-        if (pendingSushi > 0) {
-            IMiniChefV2(chef).harvest(pid, address(this));
+        IMiniChefV2(chef).harvest(pid, address(this));
+        uint256 _sushi = IERC20(sushi).balanceOf(address(this));
+        if (_sushi > 0) {
+            // 10% is locked up for future gov
+            _swapSushiswap(sushi, weth, _sushi);
         }
 
-        // swap wmatic to sushi
+        // Collect MATIC tokens
         uint256 _wmatic = IERC20(wmatic).balanceOf(address(this));
         if (_wmatic > 0) {
-            _swapWMaticToWant(_wmatic);
+            _swapSushiswap(wmatic, weth, _wmatic);
         }
+
+        uint256 _weth = IERC20(weth).balanceOf(address(this));
+        if (_weth > 0) {
+            _swapSushiswap(weth, wbtc, _weth.div(2));
+        }
+
+        uint256 _token0 = IERC20(wbtc).balanceOf(address(this));
+        uint256 _token1 = IERC20(weth).balanceOf(address(this));
+
+        if (_token0 > 0 && _token1 > 0) {
+            IERC20(wbtc).safeApprove(SUSHISWAP_ROUTER, 0);
+            IERC20(wbtc).safeApprove(SUSHISWAP_ROUTER, _token0);
+            IERC20(weth).safeApprove(SUSHISWAP_ROUTER, 0);
+            IERC20(weth).safeApprove(SUSHISWAP_ROUTER, _token1);
+
+            IUniswapRouterV2(SUSHISWAP_ROUTER).addLiquidity(
+                wbtc,
+                weth,
+                _token0,
+                _token1,
+                0,
+                0,
+                address(this),
+                now + 60
+            );
+        }
+        _profit = IERC20(want).balanceOf(address(this)).sub(_before);
 
         _debtPayment = _debtOutstanding;
 
         if (_debtPayment > 0) {
             IMiniChefV2(chef).withdraw(pid, _debtPayment, address(this));
         }
-
-        _profit = want.balanceOf(address(this)).sub(_before);
-        _loss = 0;
     }
 
     function adjustPosition(uint256 _debtOutstanding) internal override {
@@ -115,7 +151,7 @@ contract Strategy is BaseStrategy {
         if (_debtOutstanding > _beforeLp) {
             // We need to withdraw
             require(
-                balanceOfPool() > _debtOutstanding.sub(_beforeLp),
+                balanceOfPool() >= _debtOutstanding.sub(_beforeLp),
                 "Small amount of balance with Pool"
             );
             IMiniChefV2(chef).withdraw(
@@ -141,7 +177,7 @@ contract Strategy is BaseStrategy {
         if (_preWant < _amountNeeded) {
             uint256 _toWithdraw = _amountNeeded.sub(_preWant);
             require(
-                balanceOfPool() > _toWithdraw,
+                balanceOfPool() >= _toWithdraw,
                 "Small amount of balance with Pool"
             );
             IMiniChefV2(chef).withdraw(pid, _toWithdraw, address(this));
@@ -192,8 +228,9 @@ contract Strategy is BaseStrategy {
     //      return protected;
     //    }
     function protectedTokens() public view override returns (address[] memory) {
-        address[] memory protected = new address[](1);
-        protected[0] = address(want);
+        address[] memory protected = new address[](3);
+        protected[0] = address(wbtc);
+        protected[1] = address(weth);
         // NOTE: May need to add lpComponent anyway
         return protected;
     }
@@ -223,21 +260,43 @@ contract Strategy is BaseStrategy {
         return _amtInWei;
     }
 
-    /// @notice swap sushi to want
-    function _swapWMaticToWant(uint256 toSwap) internal returns (uint256) {
-        uint256 startingWantBalance = want.balanceOf(address(this));
+    /// @notice swap on sushiswap
+    function _swapSushiswap(
+        address _from,
+        address _to,
+        uint256 _amount
+    ) internal {
+        require(_to != address(0));
 
-        address[] memory path = new address[](2);
-        path[0] = wmatic;
-        path[1] = address(want);
+        address[] memory path;
 
-        // Warning, no slippage checks, can be frontrun
-        ROUTER.swapExactTokensForTokens(toSwap, 0, path, address(this), now);
+        if (_from == weth || _to == weth) {
+            path = new address[](2);
+            path[0] = _from;
+            path[1] = _to;
+        } else {
+            path = new address[](3);
+            path[0] = _from;
+            path[1] = weth;
+            path[2] = _to;
+        }
 
-        return want.balanceOf(address(this)).sub(startingWantBalance);
+        IERC20(_from).safeApprove(SUSHISWAP_ROUTER, 0);
+        IERC20(_from).safeApprove(SUSHISWAP_ROUTER, _amount);
+        IUniswapRouterV2(SUSHISWAP_ROUTER).swapExactTokensForTokens(
+            _amount,
+            0,
+            path,
+            address(this),
+            now.add(600)
+        );
     }
 
-    function checkPendingRewardInternal() internal returns (uint256, uint256) {
+    function setSlippageTolerance(uint256 _s) external onlyAuthorized {
+        sl = _s;
+    }
+
+    function checkPendingReward() public view returns (uint256, uint256) {
         uint256 _pendingSushi = IMiniChefV2(chef).pendingSushi(
             pid,
             address(this)

@@ -49,7 +49,6 @@ class StrategyResolver(StrategyCoreResolver):
         """
             Verfies that the Harvest produced yield and fees
         """
-        assert False ## You must implement this
         
         ## For basic strats the code below is sufficient
         console.print("=== Compare Harvest ===")
@@ -80,6 +79,5 @@ class StrategyResolver(StrategyCoreResolver):
 
         (Strategy Must Implement)
         """
-        assert False ## You must implement this
 
 
